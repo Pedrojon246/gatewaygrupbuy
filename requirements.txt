@@ -1,0 +1,5 @@
+flask
+requests
+web3
+SQLAlchemy
+gunicorn
