@@ -38,10 +38,7 @@ class Config:
     
     # -------- SEGURANÇA DA API --------
     # Chave secreta para autenticação do Base44
-    API_SECRET_KEY = os.environ.get(
-        'API_SECRET_KEY',
-        '[2109e4fjhaoqwrof#@R$%$%#twfwjm3tgjw$#@TGWT)%GW]'
-    )
+    API_SECRET_KEY = os.environ.get('API_SECRET_KEY')
     
     # -------- PSP/ESCROW CONFIGURATION --------
     PSP_ESCROW_API_KEY_SANDBOX = os.environ.get(
