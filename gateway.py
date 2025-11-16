@@ -359,37 +359,50 @@ class GatewayMultiAdquirente:
         print(f"[GATEWAY] Tentando processar com {nome_adquirente}...")
         
         if nome_adquirente == 'AdquirenteA':
-            endpoint = Config.ADQUIRENTE_A_ENDPOINT + "/transactions"
+            # Endpoint CORRIGIDO do Mercado Pago para criar um pagamento
+            endpoint = Config.ADQUIRENTE_A_ENDPOINT + "/v1/payments" 
             headers = {
+                # O MP usa o Access Token para autenticação
                 "Authorization": f"Bearer {Config.ADQUIRENTE_A_API_KEY}",
                 "Content-Type": "application/json"
             }
+            # Payload ajustado para os campos BÁSICOS do Mercado Pago
             payload = {
+                # O MP exige transaction_amount (valor total)
+                "transaction_amount": dados_transacao.get("valor_total"), 
+                "description": dados_transacao.get("descricao", "Compra em Grupo"),
+                # Aqui você colocaria o token gerado do cartão, mas para o teste 
+                # inicial, vamos manter os dados crus (ATENÇÃO: MUDE ISSO EM PRODUÇÃO REAL)
+                "payment_method_id": "visa", # Exemplo
+                "payer": {
+                "email": dados_transacao.get("email_cliente", "default_email@base44.com"), # Usa o email real (ou um fallback seguro)
+            },
                 "card_number": dados_transacao.get("numero_cartao"),
-                "card_cvv": dados_transacao.get("cvv"),
-                "card_expiration": dados_transacao.get("validade"),
-                "amount": dados_transacao.get("valor_total"),
-                "currency": "BRL",
-                "description": dados_transacao.get("descricao", "Compra em Grupo")
+                "security_code": dados_transacao.get("cvv"),
+                "expiration_month": dados_transacao.get("validade").split('/')[0],
+                "expiration_year": dados_transacao.get("validade").split('/')[1]
             }
             
         elif nome_adquirente == 'AdquirenteB':
-            endpoint = Config.ADQUIRENTE_B_ENDPOINT + "/payments"
+            # Endpoint CORRIGIDO do Mercado Pago (igual ao Adquirente A)
+            endpoint = Config.ADQUIRENTE_B_ENDPOINT + "/v1/payments"
             headers = {
-                "X-API-Key": Config.ADQUIRENTE_B_API_KEY,
+                # Usa o Access Token de Produção do Adquirente B (que é o MP)
+                "Authorization": f"Bearer {Config.ADQUIRENTE_B_API_KEY}",
                 "Content-Type": "application/json"
             }
+            # Payload ajustado para os campos BÁSICOS do Mercado Pago
             payload = {
-                "payment_method": "credit_card",
-                "card": {
-                    "number": dados_transacao.get("numero_cartao"),
-                    "cvv": dados_transacao.get("cvv"),
-                    "expiry": dados_transacao.get("validade")
-                },
-                "amount_cents": int(dados_transacao.get("valor_total") * 100),
-                "metadata": {
-                    "description": dados_transacao.get("descricao", "Compra em Grupo")
-                }
+                "transaction_amount": dados_transacao.get("valor_total"), 
+                "description": dados_transacao.get("descricao", "Compra em Grupo"),
+                "payment_method_id": "visa",
+                "payer": {
+                "email": dados_transacao.get("email_cliente", "default_email@base44.com"), # Usa o email real (ou um fallback seguro)
+            },
+                "card_number": dados_transacao.get("numero_cartao"),
+                "security_code": dados_transacao.get("cvv"),
+                "expiration_month": dados_transacao.get("validade").split('/')[0],
+                "expiration_year": dados_transacao.get("validade").split('/')[1]
             }
             
         else:
@@ -408,29 +421,43 @@ class GatewayMultiAdquirente:
                 "description": dados_transacao.get("descricao", "Compra em Grupo")
             }
         
-        # SIMULAÇÃO: Em produção, descomente para fazer chamada real
-        # try:
-        #     response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
-        #     if response.status_code in [200, 201]:
-        #         return True, response.json()
-        #     else:
-        #         return False, {"error": response.text}
-        # except Exception as e:
-        #     return False, {"error": str(e)}
+        # ATIVAÇÃO: CHAMADA REAL DE PRODUÇÃO
+        try:
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+            
+            if response.status_code in [200, 201]:
+                # SUCESSO. Retorna o ID de transação do Mercado Pago
+                response_json = response.json()
+                return True, { 
+                    "status": response_json.get("status", "approved"),
+                    "transaction_id": response_json.get('id'), 
+                    "adquirente": nome_adquirente,
+                    "detalhes": response_json
+                }
+            else:
+                # FALHA. Retorna o erro exato da API do MP
+                print(f"[GATEWAY] ✗ Falha MP ({response.status_code}): {response.text}")
+                return False, {"error": response.text, "status_code": response.status_code}
+        except Exception as e:
+            # Erro de conexão/timeout
+            print(f"[GATEWAY] ✗ Erro de conexão: {str(e)}")
+            return False, {"error": str(e), "status_code": 500}
         
-        import random
-        if random.random() > 0.3:
-            return True, {
-                "status": "approved",
-                "transaction_id": f"TXN_{uuid.uuid4().hex[:12].upper()}",
-                "adquirente": nome_adquirente,
-                "timestamp": datetime.now().isoformat()
-            }
-        else:
-            return False, {
-                "status": "declined",
-                "error": "Transação negada pelo emissor"
-            }
+        # O BLOCO DE SIMULAÇÃO (import random...) FOI REMOVIDO DAQUI.
+        
+       # import random
+        #if random.random() > 0.3:
+         #   return True, {
+          #      "status": "approved",
+           #     "transaction_id": f"TXN_{uuid.uuid4().hex[:12].upper()}",
+            #    "adquirente": nome_adquirente,
+             #   "timestamp": datetime.now().isoformat()
+            #}
+        #else:
+         #   return False, {
+          #      "status": "declined",
+           #     "error": "Transação negada pelo emissor"
+            #}
     
     def processar_pagamento_escrow(
         self,
@@ -513,12 +540,14 @@ class GatewayMultiAdquirente:
         }
         
         # SIMULAÇÃO: Em produção, descomente
-        # try:
-        #     response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
-        #     if response.status_code in [200, 201]:
-        #         codigo_escrow = response.json().get("escrow_code", codigo_escrow)
-        # except Exception as e:
-        #     print(f"[ESCROW] Erro ao registrar no PSP: {e}")
+        try:
+             response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+             if response.status_code in [200, 201]:
+                 codigo_escrow = response.json().get("escrow_code", codigo_escrow)
+             else:
+                 print(f"[ESCROW] ⚠ Aviso: Falha ao registrar no PSP ({response.status_code}). Registrando localmente.")
+        except Exception as e:
+            print(f"[ESCROW] Erro ao registrar no PSP: {e}")
         
         print(f"[ESCROW] ✓ Registrado no PSP: {codigo_escrow}")
         print(f"[ESCROW]   - Taxa App: R$ {valor_taxa:.2f} (retido)")
@@ -583,12 +612,15 @@ class GatewayMultiAdquirente:
         }
         
         # SIMULAÇÃO: Em produção, descomente
-        # try:
-        #     response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
-        #     if response.status_code != 200:
-        #         return {"sucesso": False, "erro": response.text}
-        # except Exception as e:
-        #     return {"sucesso": False, "erro": str(e)}
+        try:
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+            if response.status_code != 200:
+                 # Se a liberação falhar na API do PSP, não atualizamos o DB
+                print(f"[ESCROW] ✗ Falha na liberação no PSP ({response.status_code}): {response.text}")
+                return {"sucesso": False, "erro": response.text}
+        except Exception as e:
+            print(f"[ESCROW] ✗ Erro de conexão ao liberar taxa: {str(e)}")
+            return {"sucesso": False, "erro": str(e)}
         
         print(f"[ESCROW] ✓ Taxa liberada para App (Escrow: {codigo_escrow})")
         
@@ -652,12 +684,15 @@ class GatewayMultiAdquirente:
         }
         
         # SIMULAÇÃO: Em produção, descomente
-        # try:
-        #     response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
-        #     if response.status_code != 200:
-        #         return {"sucesso": False, "erro": response.text}
-        # except Exception as e:
-        #     return {"sucesso": False, "erro": str(e)}
+        try:
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+            if response.status_code != 200:
+                # Se a liberação falhar na API do PSP, não atualizamos o DB
+                print(f"[ESCROW] ✗ Falha na liberação no PSP ({response.status_code}): {response.text}")
+                return {"sucesso": False, "erro": response.text}
+        except Exception as e:
+            print(f"[ESCROW] ✗ Erro de conexão ao liberar produto: {str(e)}")
+            return {"sucesso": False, "erro": str(e)}
         
         print(f"[ESCROW] ✓ Produto liberado para Fornecedor (Escrow: {codigo_escrow})")
         
