@@ -28,16 +28,9 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 class Config:
     """
     Classe de configuração centralizada para todas as credenciais e endpoints.
-    Agora com suporte para variáveis de ambiente para maior segurança.
-    
-    PARA PRODUÇÃO: Defina as variáveis de ambiente antes de iniciar o servidor:
-    export PSP_ESCROW_API_KEY_SANDBOX="sua_chave_aqui"
-    export WEB3_PROVIDER_URL="sua_url_aqui"
-    etc.
     """
     
     # -------- SEGURANÇA DA API --------
-    # Chave secreta para autenticação do Base44
     API_SECRET_KEY = os.environ.get('API_SECRET_KEY')
     
     # -------- PSP/ESCROW CONFIGURATION --------
@@ -60,19 +53,18 @@ class Config:
     
     @staticmethod
     def get_psp_api_key():
-        """Retorna a chave de API correta baseada no ambiente"""
         if Config.PSP_ESCROW_ENVIRONMENT == "production":
             return Config.PSP_ESCROW_API_KEY_PRODUCTION
         return Config.PSP_ESCROW_API_KEY_SANDBOX
     
-    # -------- ADQUIRENTES CONFIGURATION --------
+    # -------- ADQUIRENTES CONFIGURATION (MERCADO PAGO) --------
     ADQUIRENTE_A_API_KEY = os.environ.get(
         'ADQUIRENTE_A_API_KEY',
         '[SUA_CHAVE_API_ADQUIRENTE_A_SANDBOX]'
     )
     ADQUIRENTE_A_ENDPOINT = os.environ.get(
         'ADQUIRENTE_A_ENDPOINT',
-        'https://sandbox.adquirente-a.com/api/v2'
+        'https://api.mercadopago.com' # MP ENDPOINT CORRETO
     )
     
     ADQUIRENTE_B_API_KEY = os.environ.get(
@@ -81,7 +73,7 @@ class Config:
     )
     ADQUIRENTE_B_ENDPOINT = os.environ.get(
         'ADQUIRENTE_B_ENDPOINT',
-        'https://sandbox.adquirente-b.com/api/v1'
+        'https://api.mercadopago.com' # MP ENDPOINT CORRETO
     )
     
     # -------- WEB3 CONFIGURATION --------
@@ -127,21 +119,15 @@ class Config:
 
 # ============================================================================
 # MÓDULO 2: PERSISTÊNCIA DE DADOS (SQLAlchemy + SQLite)
+# (CÓDIGO INALTERADO)
 # ============================================================================
 
 Base = declarative_base()
 
-
+# ... EscrowModel e DatabaseService (CÓDIGO INALTERADO) ...
 class EscrowModel(Base):
     """
     Modelo de dados para armazenar informações de Escrow.
-    Registra todas as transações de custódia e seus status ao longo do ciclo de vida.
-    
-    Status possíveis:
-    - PENDENTE: Escrow criado, aguardando liberações
-    - TAXA_LIBERADA: Taxa da plataforma foi liberada
-    - FINALIZADO: Produto liberado para fornecedor (ciclo completo)
-    - CANCELADO: Escrow cancelado/reembolsado
     """
     __tablename__ = 'escrows'
     
@@ -176,7 +162,6 @@ class EscrowModel(Base):
 class DatabaseService:
     """
     Serviço de banco de dados para encapsular todas as operações com SQLAlchemy.
-    Gerencia a conexão, sessões e operações CRUD para o modelo EscrowModel.
     """
     
     def __init__(self, database_url: str = None):
@@ -297,12 +282,12 @@ class DatabaseService:
 
 # ============================================================================
 # MÓDULO 3: SEGURANÇA DA API (AUTENTICAÇÃO POR API KEY)
+# (CÓDIGO INALTERADO)
 # ============================================================================
 
 def require_api_key(f):
     """
     Decorator para proteger endpoints com autenticação por API Key.
-    Verifica se o cabeçalho X-API-Key está presente e corresponde à chave configurada.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -340,10 +325,10 @@ class GatewayMultiAdquirente:
     
     def __init__(self, db_service: DatabaseService):
         """Inicializa o gateway com serviço de banco de dados"""
+        # CORRIGIDO: Removido PSP_Escrow_Fallback do roteamento
         self.roteamento_prioritario = [
             'AdquirenteA',
             'AdquirenteB',
-            'PSP_Escrow_Fallback'
         ]
         self.db = db_service
     
@@ -353,70 +338,68 @@ class GatewayMultiAdquirente:
         dados_transacao: Dict
     ) -> Tuple[bool, Dict]:
         """
-        Simula o envio de transação para um adquirente específico.
-        Em produção, faz chamadas HTTP reais para as APIs dos adquirentes.
+        Faz a chamada HTTP real para as APIs dos adquirentes (Mercado Pago).
         """
         print(f"[GATEWAY] Tentando processar com {nome_adquirente}...")
         
         if nome_adquirente == 'AdquirenteA':
-            # Endpoint CORRIGIDO do Mercado Pago para criar um pagamento
-            endpoint = Config.ADQUIRENTE_A_ENDPOINT + "/v1/payments" 
+            # Endpoint e Configurações para Mercado Pago (MP)
+            endpoint = Config.ADQUIRENTE_A_ENDPOINT.rstrip('/') + "/v1/payments"
             headers = {
-                # O MP usa o Access Token para autenticação
                 "Authorization": f"Bearer {Config.ADQUIRENTE_A_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                # Adicionando chave de Idempotência para segurança contra duplicação
+                "X-Idempotency-Key": str(uuid.uuid4())
             }
-            # Payload ajustado para os campos BÁSICOS do Mercado Pago
+            # CORRIGIDO: Payload para usar TOKEN (Obrigatório em produção MP)
             payload = {
-                # O MP exige transaction_amount (valor total)
-                "transaction_amount": dados_transacao.get("valor_total"), 
+                "transaction_amount": float(dados_transacao.get("valor_total")), 
                 "description": dados_transacao.get("descricao", "Compra em Grupo"),
-                # Aqui você colocaria o token gerado do cartão, mas para o teste 
-                # inicial, vamos manter os dados crus (ATENÇÃO: MUDE ISSO EM PRODUÇÃO REAL)
-                "payment_method_id": "visa", # Exemplo
+                "token": dados_transacao.get("card_token"),  # <-- USA O TOKEN DO FRONTEND
+                "installments": 1, # Pode ser dinâmico, mas 1 para teste
+                "payment_method_id": dados_transacao.get("payment_method_id", "visa"),
                 "payer": {
-                "email": dados_transacao.get("email_cliente", "default_email@base44.com"), # Usa o email real (ou um fallback seguro)
-            },
-                "card_number": dados_transacao.get("numero_cartao"),
-                "security_code": dados_transacao.get("cvv"),
-                "expiration_month": dados_transacao.get("validade").split('/')[0],
-                "expiration_year": dados_transacao.get("validade").split('/')[1]
+                    "email": dados_transacao.get("email_cliente", "default_email@base44.com"),
+                    "identification": {
+                        "type": dados_transacao.get("doc_type", "CPF"),
+                        "number": dados_transacao.get("doc_number", "12345678900")
+                    }
+                }
             }
             
         elif nome_adquirente == 'AdquirenteB':
-            # Endpoint CORRIGIDO do Mercado Pago (igual ao Adquirente A)
-            endpoint = Config.ADQUIRENTE_B_ENDPOINT + "/v1/payments"
+            # Endpoint e Configurações para Mercado Pago (MP)
+            endpoint = Config.ADQUIRENTE_B_ENDPOINT.rstrip('/') + "/v1/payments"
             headers = {
-                # Usa o Access Token de Produção do Adquirente B (que é o MP)
                 "Authorization": f"Bearer {Config.ADQUIRENTE_B_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                 "X-Idempotency-Key": str(uuid.uuid4())
             }
-            # Payload ajustado para os campos BÁSICOS do Mercado Pago
+            # CORRIGIDO: Payload para usar TOKEN (Obrigatório em produção MP)
             payload = {
-                "transaction_amount": dados_transacao.get("valor_total"), 
+                "transaction_amount": float(dados_transacao.get("valor_total")), 
                 "description": dados_transacao.get("descricao", "Compra em Grupo"),
-                "payment_method_id": "visa",
+                "token": dados_transacao.get("card_token"), # <-- USA O TOKEN DO FRONTEND
+                "installments": 1, # Pode ser dinâmico
+                "payment_method_id": dados_transacao.get("payment_method_id", "visa"),
                 "payer": {
-                "email": dados_transacao.get("email_cliente", "default_email@base44.com"), # Usa o email real (ou um fallback seguro)
-            },
-                "card_number": dados_transacao.get("numero_cartao"),
-                "security_code": dados_transacao.get("cvv"),
-                "expiration_month": dados_transacao.get("validade").split('/')[0],
-                "expiration_year": dados_transacao.get("validade").split('/')[1]
+                    "email": dados_transacao.get("email_cliente", "default_email@base44.com"),
+                    "identification": {
+                        "type": dados_transacao.get("doc_type", "CPF"),
+                        "number": dados_transacao.get("doc_number", "12345678900")
+                    }
+                }
             }
             
         else:
+             # Este bloco só será acionado se você adicionar um novo PSP no roteamento
             endpoint = Config.PSP_ESCROW_ENDPOINT + "/transactions"
             headers = {
                 "Authorization": f"Bearer {Config.get_psp_api_key()}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "card_data": {
-                    "number": dados_transacao.get("numero_cartao"),
-                    "cvv": dados_transacao.get("cvv"),
-                    "expiration": dados_transacao.get("validade")
-                },
+                 # O FLUXO DE TOKENIZAÇÃO DESTE PSP DEVE SER DEFINIDO AQUI
                 "amount": dados_transacao.get("valor_total"),
                 "description": dados_transacao.get("descricao", "Compra em Grupo")
             }
@@ -443,22 +426,8 @@ class GatewayMultiAdquirente:
             print(f"[GATEWAY] ✗ Erro de conexão: {str(e)}")
             return False, {"error": str(e), "status_code": 500}
         
-        # O BLOCO DE SIMULAÇÃO (import random...) FOI REMOVIDO DAQUI.
-        
-       # import random
-        #if random.random() > 0.3:
-         #   return True, {
-          #      "status": "approved",
-           #     "transaction_id": f"TXN_{uuid.uuid4().hex[:12].upper()}",
-            #    "adquirente": nome_adquirente,
-             #   "timestamp": datetime.now().isoformat()
-            #}
-        #else:
-         #   return False, {
-          #      "status": "declined",
-           #     "error": "Transação negada pelo emissor"
-            #}
     
+    # ... processar_pagamento_escrow e outros métodos (CÓDIGO INALTERADO) ...
     def processar_pagamento_escrow(
         self,
         dados_transacao: Dict,
@@ -570,7 +539,6 @@ class GatewayMultiAdquirente:
     def liberar_taxa(self, codigo_escrow: str) -> Dict:
         """
         Libera o valor da taxa para a conta final do App.
-        AGORA COM VALIDAÇÃO NO BANCO DE DADOS.
         """
         # VALIDAÇÃO NO BANCO DE DADOS
         escrow_db = self.db.buscar_por_codigo(codigo_escrow)
@@ -639,7 +607,6 @@ class GatewayMultiAdquirente:
     def liberar_produto_fornecedor(self, codigo_escrow: str) -> Dict:
         """
         Libera o valor do produto para a conta final do Fornecedor.
-        AGORA COM VALIDAÇÃO NO BANCO DE DADOS.
         """
         # VALIDAÇÃO NO BANCO DE DADOS
         escrow_db = self.db.buscar_por_codigo(codigo_escrow)
@@ -711,14 +678,11 @@ class GatewayMultiAdquirente:
 
 # ============================================================================
 # MÓDULO 5: LÓGICA WEB3 (TOKEN GATING)
+# (CÓDIGO INALTERADO)
 # ============================================================================
 
 class VerificadorTokenWeb3:
-    """
-    Classe responsável pela verificação de posse de tokens na blockchain.
-    Implementa Token Gating para benefícios diferenciados.
-    """
-    
+    # ... (CÓDIGO INALTERADO) ...
     def __init__(self):
         """Inicializa conexão Web3 e contrato do token"""
         try:
@@ -757,7 +721,6 @@ class VerificadorTokenWeb3:
     def verificar_posse_token(self, endereco_carteira: str) -> Dict:
         """Verifica se um endereço possui a quantidade mínima de tokens"""
         
-        # 1. VERIFICAÇÃO DE CONEXÃO INICIAL (ESTRUTURA DE CONTROLE IF)
         if not self.w3 or not self.contrato:
             return {
                 "token_holder": False,
@@ -765,7 +728,6 @@ class VerificadorTokenWeb3:
                 "erro": "Serviço Web3 não disponível"
             }
         
-        # 2. INÍCIO DO TRATAMENTO DE ERRO (ESTRUTURA TRY)
         try:
             if not self.w3.is_address(endereco_carteira):
                 return {
@@ -777,7 +739,6 @@ class VerificadorTokenWeb3:
             checksum_address = self.w3.to_checksum_address(endereco_carteira)
             
             saldo_raw = self.contrato.functions.balanceOf(checksum_address).call()
-            # Converte o saldo de RAW (com decimais) para um número legível (float)
             saldo = saldo_raw / (10 ** self.decimals)
             
             is_holder = saldo >= Config.MIN_BALANCE_UNITS
@@ -786,7 +747,6 @@ class VerificadorTokenWeb3:
             print(f"[WEB3]   - Saldo: {saldo:.2f} tokens")
             print(f"[WEB3]   - Holder: {'SIM' if is_holder else 'NÃO'}")
             
-            # RETORNO DE SUCESSO (DENTRO DO TRY)
             return {
                 "token_holder": is_holder,
                 "saldo": saldo,
@@ -795,7 +755,6 @@ class VerificadorTokenWeb3:
                 "endereco_verificado": checksum_address
             }
             
-        # 3. TRATAMENTO DE ERRO (ESTRUTURA EXCEPT)
         except Exception as e:
             print(f"[WEB3] ✗ Erro na verificação: {e}")
             return {
@@ -821,32 +780,36 @@ verificador_web3 = VerificadorTokenWeb3()
 @require_api_key
 def checkout():
     """
-    Endpoint principal de checkout: Orquestra verificação de token,
-    cálculo de taxa e processamento de pagamento com escrow.
-    PROTEGIDO COM AUTENTICAÇÃO POR API KEY.
+    Endpoint principal de checkout. AGORA RECEBE O TOKEN DO CARTÃO.
     
     Body esperado:
     {
-        "endereco_carteira": "0x...",  (opcional)
-        "dados_cartao": {
-            "numero_cartao": "4111111111111111",
-            "cvv": "123",
-            "validade": "12/25",
-            "nome_titular": "João Silva"
-        },
+        "card_token": "abc123...",     (TOKEN DO FRONTEND - OBRIGATÓRIO)
+        "payment_method_id": "visa",
+        "email_cliente": "cliente@email.com",
+        "doc_type": "CPF",
+        "doc_number": "12345678900",
         "valor_produto": 100.00,
         "id_fornecedor": "FORN_12345",
-        "descricao": "Compra em Grupo - Produto X"
+        "descricao": "Compra em Grupo - Produto X",
+        "endereco_carteira": "0x..." (opcional)
     }
     """
     try:
         dados = request.get_json()
         
-        endereco_carteira = dados.get('endereco_carteira')
-        dados_cartao = dados.get('dados_cartao', {})
+        # CAMPOS OBRIGATÓRIOS DO NOVO FLUXO (Tokenizado)
+        card_token = dados.get('card_token')
+        email_cliente = dados.get('email_cliente')
+        
+        # VALIDAÇÃO CRÍTICA DO FLUXO DE PRODUÇÃO
+        if not card_token:
+            return jsonify({"erro": "Token do cartão (card_token) não fornecido. O frontend deve tokenizar primeiro."}), 400
+        
         valor_produto = float(dados.get('valor_produto', 0))
         id_fornecedor = dados.get('id_fornecedor')
         descricao = dados.get('descricao', 'Compra em Grupo')
+        endereco_carteira = dados.get('endereco_carteira')
         
         if valor_produto <= 0:
             return jsonify({"erro": "Valor do produto inválido"}), 400
@@ -873,11 +836,13 @@ def checkout():
         valor_taxa = valor_produto * (percentual_taxa / 100)
         valor_total = valor_produto + valor_taxa
         
+        # DADOS DA TRANSAÇÃO ATUALIZADOS PARA USAR O TOKEN
         dados_transacao = {
-            "numero_cartao": dados_cartao.get('numero_cartao'),
-            "cvv": dados_cartao.get('cvv'),
-            "validade": dados_cartao.get('validade'),
-            "nome_titular": dados_cartao.get('nome_titular'),
+            "card_token": card_token,
+            "payment_method_id": dados.get('payment_method_id', 'visa'),
+            "email_cliente": email_cliente,
+            "doc_type": dados.get('doc_type', 'CPF'),
+            "doc_number": dados.get('doc_number'),
             "valor_total": valor_total,
             "descricao": descricao
         }
@@ -923,16 +888,7 @@ def checkout():
 
 @app.route('/api/web3/check', methods=['POST'])
 def check_web3():
-    """
-    Endpoint para verificação isolada de posse de token.
-    Útil para validações antes do checkout ou para acesso antecipado.
-    NÃO PROTEGIDO - Pode ser público para verificações rápidas.
-    
-    Body esperado:
-    {
-        "endereco_carteira": "0x..."
-    }
-    """
+    # ... (CÓDIGO INALTERADO) ...
     try:
         dados = request.get_json()
         endereco_carteira = dados.get('endereco_carteira')
@@ -951,16 +907,7 @@ def check_web3():
 @app.route('/api/escrow/liberar/taxa', methods=['POST'])
 @require_api_key
 def liberar_taxa():
-    """
-    Endpoint para liberar a taxa da plataforma.
-    Chamado pelo Base44 quando o grupo é fechado/formado.
-    PROTEGIDO COM AUTENTICAÇÃO POR API KEY.
-    
-    Body esperado:
-    {
-        "codigo_escrow": "ESC_ABC123..."
-    }
-    """
+    # ... (CÓDIGO INALTERADO) ...
     try:
         dados = request.get_json()
         codigo_escrow = dados.get('codigo_escrow')
@@ -982,16 +929,7 @@ def liberar_taxa():
 @app.route('/api/escrow/liberar/produto', methods=['POST'])
 @require_api_key
 def liberar_produto():
-    """
-    Endpoint para liberar o valor do produto para o fornecedor.
-    Chamado pelo Base44 quando o produto é entregue/confirmado.
-    PROTEGIDO COM AUTENTICAÇÃO POR API KEY.
-    
-    Body esperado:
-    {
-        "codigo_escrow": "ESC_ABC123..."
-    }
-    """
+    # ... (CÓDIGO INALTERADO) ...
     try:
         dados = request.get_json()
         codigo_escrow = dados.get('codigo_escrow')
@@ -1013,10 +951,7 @@ def liberar_produto():
 @app.route('/api/escrow/consultar/<codigo_escrow>', methods=['GET'])
 @require_api_key
 def consultar_escrow(codigo_escrow):
-    """
-    Endpoint para consultar status de um escrow.
-    PROTEGIDO COM AUTENTICAÇÃO POR API KEY.
-    """
+    # ... (CÓDIGO INALTERADO) ...
     try:
         escrow = db_service.buscar_por_codigo(codigo_escrow)
         
@@ -1071,4 +1006,4 @@ def health():
 #    print("\n[SISTEMA] Servidor iniciando na porta 5000...")
 #    print("[SISTEMA] Pressione CTRL+C para parar\n")
 #    
-#    app.run(debug=True, host='0.0.0.0', port=5000) 
+#    app.run(debug=True, host='0.0.0.0', port=5000)
