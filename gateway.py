@@ -115,7 +115,7 @@ class Config:
     ]
     
     # -------- TAXAS DO SISTEMA --------
-    TAXA_COM_TOKEN = float(os.environ.get('TAXA_COM_TOKEN', 3.0))
+    TAXA_COM_TOKEN = float(os.environ.get('TAXA_COM_TOKEN', 2.0))
     TAXA_SEM_TOKEN = float(os.environ.get('TAXA_SEM_TOKEN', 5.0))
     
     # -------- DATABASE CONFIGURATION --------
